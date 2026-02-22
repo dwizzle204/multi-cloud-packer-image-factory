@@ -1,0 +1,14 @@
+---
+# Shared variables for both OS builds.
+
+image_factory:
+  manifest_linux_path: "/var/log/image_factory/manifest.json"
+  manifest_windows_path: 'C:\ProgramData\ImageFactory\manifest.json'
+
+# Metadata defaults; workflows/packer can override these.
+metadata:
+  image_name: "image-factory"
+  image_version: "0.0.0"
+  channel: "candidate"
+  git_sha: "unknown"
+  build_date: "unknown"

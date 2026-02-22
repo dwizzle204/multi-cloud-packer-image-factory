@@ -1,0 +1,131 @@
+name: Image Terratest
+
+on:
+  workflow_dispatch:
+    inputs:
+      cloud:
+        description: "Cloud to test: aws | azure | gcp"
+        required: true
+        default: "aws"
+      image_id:
+        description: "Image identifier (AMI ID, Azure image resource ID, or GCP image name)"
+        required: true
+      os_type:
+        description: "OS type for cloud fixture behavior: linux | windows"
+        required: true
+        default: "linux"
+      aws_region:
+        description: "AWS region (required for aws)"
+        required: false
+        default: ""
+      gcp_zone:
+        description: "GCP zone (required for gcp)"
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terratest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${{ inputs.cloud }}" in
+            aws|azure|gcp) ;;
+            *) echo "Invalid cloud input" >&2; exit 1 ;;
+          esac
+
+          case "${{ inputs.os_type }}" in
+            linux|windows) ;;
+            *) echo "Invalid os_type input" >&2; exit 1 ;;
+          esac
+
+          if [[ "${{ inputs.cloud }}" == "aws" && -z "${{ inputs.aws_region }}" ]]; then
+            echo "aws_region is required for cloud=aws" >&2
+            exit 1
+          fi
+
+          if [[ "${{ inputs.cloud }}" == "gcp" && -z "${{ inputs.gcp_zone }}" ]]; then
+            echo "gcp_zone is required for cloud=gcp" >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials
+        if: inputs.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-image-terratest
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Azure login (OIDC)
+        if: inputs.cloud == 'azure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Authenticate to Google Cloud (OIDC)
+        if: inputs.cloud == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        if: inputs.cloud == 'gcp'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download Go dependencies
+        working-directory: tests/terratest
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod download
+
+      - name: Run Terratest
+        working-directory: tests/terratest
+        shell: bash
+        env:
+          TEST_OS_TYPE: ${{ inputs.os_type }}
+          TERRATEST_ENABLE_AWS: ${{ inputs.cloud == 'aws' && 'true' || 'false' }}
+          TERRATEST_ENABLE_AZURE: ${{ inputs.cloud == 'azure' && 'true' || 'false' }}
+          TERRATEST_ENABLE_GCP: ${{ inputs.cloud == 'gcp' && 'true' || 'false' }}
+          AWS_TEST_REGION: ${{ inputs.aws_region }}
+          AWS_TEST_IMAGE_ID: ${{ inputs.image_id }}
+          AZURE_TEST_IMAGE_ID: ${{ inputs.image_id }}
+          AZURE_TEST_RESOURCE_GROUP: ${{ vars.AZURE_TEST_RESOURCE_GROUP }}
+          AZURE_TEST_SUBNET_ID: ${{ vars.AZURE_TEST_SUBNET_ID }}
+          AZURE_TEST_LOCATION: ${{ vars.AZURE_TEST_LOCATION }}
+          AZURE_TEST_ADMIN_USERNAME: ${{ vars.AZURE_TEST_ADMIN_USERNAME }}
+          AZURE_TEST_LINUX_SSH_PUBLIC_KEY: ${{ vars.AZURE_TEST_LINUX_SSH_PUBLIC_KEY }}
+          AZURE_TEST_WINDOWS_ADMIN_PASSWORD: ${{ secrets.AZURE_TEST_WINDOWS_ADMIN_PASSWORD }}
+          GCP_TEST_PROJECT_ID: ${{ vars.GCP_TEST_PROJECT_ID }}
+          GCP_TEST_ZONE: ${{ inputs.gcp_zone }}
+          GCP_TEST_IMAGE_NAME: ${{ inputs.image_id }}
+        run: |
+          set -euo pipefail
+
+          case "${{ inputs.cloud }}" in
+            aws) go test -v -run TestTerratestAWSImageInstance ./... ;;
+            azure) go test -v -run TestTerratestAzureImageInstance ./... ;;
+            gcp) go test -v -run TestTerratestGCPImageInstance ./... ;;
+          esac

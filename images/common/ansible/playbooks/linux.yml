@@ -1,0 +1,25 @@
+---
+- name: Configure RHEL 9 image baseline + CIS
+  hosts: all
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/rhel9.yml
+  pre_tasks:
+    - name: Ensure ImageFactory log directory exists
+      ansible.builtin.file:
+        path: /var/log/image_factory
+        state: directory
+        mode: "0755"
+
+  roles:
+    - role: common_baseline
+    - role: ansible-lockdown.rhel9_cis
+    - role: common_agents_stub
+
+  post_tasks:
+    - name: Write CIS applied marker
+      ansible.builtin.copy:
+        dest: /var/log/image_factory/cis_applied.txt
+        content: "CIS applied via ansible-lockdown.rhel9_cis\n"
+        mode: "0644"

@@ -1,0 +1,52 @@
+---
+- name: Determine OS family
+  ansible.builtin.set_fact:
+    _is_windows: "{{ ansible_os_family | lower == 'windows' }}"
+
+- name: Write manifest for Linux
+  when: not _is_windows
+  block:
+    - name: Build manifest content
+      ansible.builtin.copy:
+        dest: "{{ image_factory.manifest_linux_path }}"
+        mode: "0644"
+        content: |
+          {
+            "image_name": "{{ metadata.image_name }}",
+            "image_version": "{{ metadata.image_version }}",
+            "channel": "{{ metadata.channel }}",
+            "git_sha": "{{ metadata.git_sha }}",
+            "build_date": "{{ metadata.build_date }}",
+            "os_family": "{{ ansible_os_family }}",
+            "os": "{{ ansible_distribution }}",
+            "os_version": "{{ ansible_distribution_version }}"
+          }
+
+    - name: Write build marker
+      ansible.builtin.copy:
+        dest: /var/log/image_factory/build_marker.txt
+        mode: "0644"
+        content: "baseline_applied=true\n"
+
+- name: Write manifest for Windows
+  when: _is_windows
+  block:
+    - name: Write manifest content
+      ansible.windows.win_copy:
+        dest: "{{ image_factory.manifest_windows_path }}"
+        content: |
+          {
+            "image_name": "{{ metadata.image_name }}",
+            "image_version": "{{ metadata.image_version }}",
+            "channel": "{{ metadata.channel }}",
+            "git_sha": "{{ metadata.git_sha }}",
+            "build_date": "{{ metadata.build_date }}",
+            "os_family": "{{ ansible_os_family }}",
+            "os": "{{ ansible_distribution }}",
+            "os_version": "{{ ansible_distribution_version }}"
+          }
+
+    - name: Write build marker
+      ansible.windows.win_copy:
+        dest: C:\ProgramData\ImageFactory\build_marker.txt
+        content: "baseline_applied=true`r`n"

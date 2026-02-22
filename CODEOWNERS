@@ -1,0 +1,33 @@
+# CODEOWNERS
+#
+# Template placeholders:
+# - Replace @org/... values with your actual GitHub teams or users.
+# - Keep ownership broad enough to avoid review bottlenecks.
+
+# Default owners for all files.
+* @org/platform-owners
+
+# Workflow and automation ownership.
+.github/workflows/* @org/platform-owners @org/security-owners
+
+# Image build definitions and shared scripts.
+images/*/*.pkr.hcl @org/image-engineering @org/platform-owners
+images/common/packer/* @org/image-engineering @org/platform-owners
+images/common/scripts/* @org/image-engineering @org/platform-owners
+
+# CIS hardening and Ansible content.
+images/common/ansible/* @org/security-owners @org/os-build-owners
+
+# Test ownership.
+tests/terratest/* @org/platform-test-owners @org/platform-owners
+tests/compliance/* @org/security-owners @org/platform-test-owners
+
+# Documentation ownership.
+README.md @org/docs-owners @org/platform-owners
+TEMPLATE_USAGE.md @org/docs-owners @org/platform-owners
+SETUP_GUIDE.md @org/docs-owners @org/platform-owners
+docs/* @org/docs-owners @org/platform-owners
+
+# Release metadata.
+CHANGELOG.md @org/platform-owners
+VERSION @org/platform-owners

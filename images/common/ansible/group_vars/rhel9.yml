@@ -1,0 +1,12 @@
+---
+# RHEL9 CIS role variables (examples).
+# Set only what you need, and document exceptions.
+
+# Many ansible-lockdown roles support variables to skip or tune rules.
+# Refer to the role's README for exact variable names.
+# Example placeholders (do not assume correctness without reviewing the upstream role):
+rhel9_cis_skip_for_troubleshooting: false
+
+# Example: allow specific services if required
+# rhel9_cis_allow_services:
+#   - chronyd

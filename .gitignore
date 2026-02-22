@@ -1,0 +1,21 @@
+# Local environment-specific Packer vars (may contain sensitive values)
+images/rhel9/rhel9.auto.pkrvars.hcl
+images/win2022/win2022.auto.pkrvars.hcl
+images/rhel9/overrides/*.pkrvars.hcl
+images/win2022/overrides/*.pkrvars.hcl
+
+# Terratest local state and test artifacts
+tests/terratest/.terraform/
+tests/terratest/.terraform.lock.hcl
+tests/terratest/**/terraform.tfstate
+tests/terratest/**/terraform.tfstate.*
+tests/terratest/terratest.log
+tests/terratest/*.pem
+
+# Local env files
+.env
+.env.*
+
+# Local tooling state
+.DS_Store
+*.log

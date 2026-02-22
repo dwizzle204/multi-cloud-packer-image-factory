@@ -1,0 +1,27 @@
+# Copy this file to: rhel9.auto.pkrvars.hcl
+# Fill in your environment-specific values.
+
+image_name    = "rhel9-base"
+image_version = "2026.02.21.1"
+channel       = "candidate"
+git_sha       = "local"
+build_date    = "2026-02-21"
+
+# AWS
+aws_region      = "us-east-1"
+aws_source_ami  = "ami-xxxxxxxxxxxxxxxxx"
+aws_instance_type = "t3.medium"
+
+# Azure
+azure_location            = "eastus"
+azure_resource_group      = "rg-image-factory"
+azure_vm_size             = "Standard_D2s_v5"
+azure_source_image_publisher = "RedHat"
+azure_source_image_offer     = "RHEL"
+azure_source_image_sku       = "9-lvm"
+
+# GCP
+gcp_project_id  = "my-project"
+gcp_zone        = "us-central1-a"
+gcp_source_image= "rhel-cloud/rhel-9"
+gcp_image_family= "rhel9-base"

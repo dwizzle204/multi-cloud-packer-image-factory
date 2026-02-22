@@ -1,0 +1,191 @@
+name: Image Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS: rhel9 | win2022"
+        required: true
+        default: "rhel9"
+      cloud:
+        description: "Cloud: aws | azure | gcp"
+        required: true
+        default: "azure"
+      image_version:
+        description: "Image version to promote"
+        required: true
+      target_channel:
+        description: "Target channel (typically prod)"
+        required: true
+        default: "prod"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve var file and image identifiers
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${{ inputs.os }}" in
+            rhel9) vars_file="images/rhel9/rhel9.auto.pkrvars.hcl" ;;
+            win2022) vars_file="images/win2022/win2022.auto.pkrvars.hcl" ;;
+            *)
+              echo "Invalid os input. Allowed: rhel9, win2022" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ ! -f "$vars_file" ]]; then
+            echo "Missing required file: $vars_file" >&2
+            exit 1
+          fi
+
+          get_var() {
+            local key="$1"
+            local file="$2"
+            awk -F= -v k="$key" '
+              $1 ~ "^[[:space:]]*" k "[[:space:]]*$" {
+                v=$2
+                sub(/^[[:space:]]+/, "", v)
+                sub(/[[:space:]]*#.*/, "", v)
+                gsub(/\"/, "", v)
+                gsub(/[[:space:]]+$/, "", v)
+                print v
+                exit
+              }
+            ' "$file"
+          }
+
+          image_name="$(get_var image_name "$vars_file")"
+          aws_region="$(get_var aws_region "$vars_file")"
+          azure_resource_group="$(get_var azure_resource_group "$vars_file")"
+          gcp_project_id="$(get_var gcp_project_id "$vars_file")"
+
+          if [[ "${{ inputs.cloud }}" == "gcp" ]]; then
+            image_full_name="${image_name}-${{ inputs.image_version }}"
+            image_full_name="${image_full_name//./-}"
+          else
+            image_full_name="${image_name}-${{ inputs.image_version }}"
+          fi
+
+          echo "vars_file=$vars_file" >> "$GITHUB_OUTPUT"
+          echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
+          echo "image_full_name=$image_full_name" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$aws_region" >> "$GITHUB_OUTPUT"
+          echo "azure_resource_group=$azure_resource_group" >> "$GITHUB_OUTPUT"
+          echo "gcp_project_id=$gcp_project_id" >> "$GITHUB_OUTPUT"
+
+      # Required repository variables/secrets for auth:
+      # AWS:   vars.AWS_ROLE_TO_ASSUME
+      # Azure: vars.AZURE_CLIENT_ID, vars.AZURE_TENANT_ID, vars.AZURE_SUBSCRIPTION_ID
+      # GCP:   vars.GCP_WORKLOAD_IDENTITY_PROVIDER, vars.GCP_SERVICE_ACCOUNT
+      - name: Configure AWS credentials
+        if: inputs.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-image-promote
+          aws-region: ${{ steps.vars.outputs.aws_region }}
+
+      - name: Azure login (OIDC)
+        if: inputs.cloud == 'azure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Authenticate to Google Cloud (OIDC)
+        if: inputs.cloud == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        if: inputs.cloud == 'gcp'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Promote on AWS (AMI tags)
+        if: inputs.cloud == 'aws'
+        id: promote_aws
+        shell: bash
+        run: |
+          set -euo pipefail
+          ami_id="$(images/common/scripts/aws/promote-ami.sh \
+            "${{ steps.vars.outputs.aws_region }}" \
+            "${{ steps.vars.outputs.image_full_name }}" \
+            "${{ inputs.image_version }}" \
+            "${{ inputs.target_channel }}" \
+            "candidate")"
+          echo "artifact_id=$ami_id" >> "$GITHUB_OUTPUT"
+
+      - name: Promote on Azure (managed image tags)
+        if: inputs.cloud == 'azure'
+        id: promote_azure
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(images/common/scripts/azure/promote-managed-image.sh \
+            "${{ steps.vars.outputs.azure_resource_group }}" \
+            "${{ steps.vars.outputs.image_full_name }}" \
+            "${{ inputs.target_channel }}" \
+            "${{ inputs.image_version }}" \
+            "candidate")"
+          echo "artifact_id=$image_id" >> "$GITHUB_OUTPUT"
+
+      - name: Promote on GCP (image labels)
+        if: inputs.cloud == 'gcp'
+        id: promote_gcp
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(images/common/scripts/gcp/promote-image-labels.sh \
+            "${{ steps.vars.outputs.gcp_project_id }}" \
+            "${{ steps.vars.outputs.image_full_name }}" \
+            "${{ inputs.target_channel }}" \
+            "${{ inputs.image_version }}" \
+            "candidate")"
+          echo "artifact_id=$image_id" >> "$GITHUB_OUTPUT"
+
+      - name: Write promotion summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_id=""
+          if [[ "${{ inputs.cloud }}" == "aws" ]]; then
+            artifact_id="${{ steps.promote_aws.outputs.artifact_id }}"
+          elif [[ "${{ inputs.cloud }}" == "azure" ]]; then
+            artifact_id="${{ steps.promote_azure.outputs.artifact_id }}"
+          else
+            artifact_id="${{ steps.promote_gcp.outputs.artifact_id }}"
+          fi
+
+          cat > promotion-summary.env <<EOF
+          os=${{ inputs.os }}
+          cloud=${{ inputs.cloud }}
+          image_name=${{ steps.vars.outputs.image_name }}
+          image_full_name=${{ steps.vars.outputs.image_full_name }}
+          image_version=${{ inputs.image_version }}
+          target_channel=${{ inputs.target_channel }}
+          artifact_id=${artifact_id}
+          promoted_by=${{ github.actor }}
+          promoted_run=${{ github.run_id }}
+          EOF
+
+      - name: Upload promotion summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: promote-${{ inputs.os }}-${{ inputs.cloud }}-${{ inputs.image_version }}
+          path: promotion-summary.env

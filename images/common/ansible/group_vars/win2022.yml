@@ -1,0 +1,6 @@
+---
+# Windows 2022 CIS role variables (examples).
+# Set only what you need, and document exceptions.
+
+# Placeholder variables — check upstream role docs for exact names.
+windows_2022_cis_skip_for_troubleshooting: false

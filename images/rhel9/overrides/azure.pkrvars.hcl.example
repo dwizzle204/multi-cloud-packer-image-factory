@@ -1,0 +1,7 @@
+# RHEL9 Azure-only overrides
+azure_location               = "eastus"
+azure_resource_group         = "rg-image-factory"
+azure_vm_size                = "Standard_D2s_v5"
+azure_source_image_publisher = "RedHat"
+azure_source_image_offer     = "RHEL"
+azure_source_image_sku       = "9-lvm"

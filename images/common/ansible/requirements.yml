@@ -1,0 +1,13 @@
+---
+roles:
+  # Pin to versions you have tested.
+  - name: ansible-lockdown.rhel9_cis
+    version: "2.0.3"
+  - name: ansible-lockdown.windows_2022_cis
+    version: "3.0.5"
+
+collections:
+  - name: ansible.windows
+    version: "3.3.0"
+  - name: community.windows
+    version: "3.1.0"

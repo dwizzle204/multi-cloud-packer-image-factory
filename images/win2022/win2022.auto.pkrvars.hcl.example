@@ -1,0 +1,28 @@
+# Copy this file to: win2022.auto.pkrvars.hcl
+# Fill in your environment-specific values.
+
+image_name    = "win2022-base"
+image_version = "2026.02.21.1"
+channel       = "candidate"
+git_sha       = "local"
+build_date    = "2026-02-21"
+
+# AWS
+aws_region          = "us-east-1"
+aws_source_ami      = "ami-xxxxxxxxxxxxxxxxx" # Windows base AMI
+aws_instance_type   = "t3.large"
+aws_winrm_username  = "Administrator"
+
+# Azure
+azure_location            = "eastus"
+azure_resource_group      = "rg-image-factory"
+azure_vm_size             = "Standard_D4s_v5"
+azure_source_image_publisher = "MicrosoftWindowsServer"
+azure_source_image_offer     = "WindowsServer"
+azure_source_image_sku       = "2022-datacenter"
+
+# GCP
+gcp_project_id   = "my-project"
+gcp_zone         = "us-central1-a"
+gcp_source_image = "windows-cloud/windows-2022"
+gcp_image_family = "win2022-base"

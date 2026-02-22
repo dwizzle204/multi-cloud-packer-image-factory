@@ -1,0 +1,8 @@
+---
+# Default baseline metadata. Workflows and Packer usually override these.
+metadata:
+  image_name: image-factory
+  image_version: 0.0.0
+  channel: candidate
+  git_sha: unknown
+  build_date: unknown

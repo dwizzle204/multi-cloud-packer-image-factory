@@ -1,0 +1,10 @@
+[image_build]
+windows-builder ansible_host=10.0.1.10
+
+[image_build:vars]
+ansible_connection=winrm
+ansible_user=Administrator
+ansible_password=REPLACE_ME
+ansible_port=5985
+ansible_winrm_transport=basic
+ansible_winrm_server_cert_validation=ignore

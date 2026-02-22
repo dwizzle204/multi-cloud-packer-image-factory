@@ -1,0 +1,248 @@
+name: Image Retention
+
+on:
+  schedule:
+    # Weekly retention pass.
+    - cron: "45 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS scope: rhel9 | win2022 | all"
+        required: true
+        default: "all"
+      clouds:
+        description: "Cloud scope: aws,azure,gcp"
+        required: true
+        default: "aws,azure,gcp"
+      keep_prod:
+        description: "How many prod versions to keep"
+        required: true
+        default: "5"
+      keep_candidate:
+        description: "How many candidate versions to keep"
+        required: true
+        default: "10"
+      dry_run:
+        description: "Preview deletions only (true|false)"
+        required: true
+        default: "true"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      os_json: ${{ steps.scope.outputs.os_json }}
+      clouds_json: ${{ steps.scope.outputs.clouds_json }}
+      keep_prod: ${{ steps.params.outputs.keep_prod }}
+      keep_candidate: ${{ steps.params.outputs.keep_candidate }}
+      dry_run: ${{ steps.params.outputs.dry_run }}
+    steps:
+      - name: Resolve scope defaults
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          os_input="${{ inputs.os || 'all' }}"
+          clouds_input="${{ inputs.clouds || 'aws,azure,gcp' }}"
+
+          case "$os_input" in
+            all) os_json='["rhel9","win2022"]' ;;
+            rhel9) os_json='["rhel9"]' ;;
+            win2022) os_json='["win2022"]' ;;
+            *)
+              echo "Invalid os input. Allowed: rhel9, win2022, all" >&2
+              exit 1
+              ;;
+          esac
+
+          IFS=',' read -ra arr <<< "$clouds_input"
+          clouds_json="["
+          first=1
+          for c in "${arr[@]}"; do
+            c="$(echo "$c" | xargs)"
+            [[ -z "$c" ]] && continue
+            if [[ "$c" != "aws" && "$c" != "azure" && "$c" != "gcp" ]]; then
+              echo "Invalid cloud '$c'. Allowed: aws, azure, gcp" >&2
+              exit 1
+            fi
+            if [[ $first -eq 0 ]]; then clouds_json+=", "; fi
+            first=0
+            clouds_json+="\"$c\""
+          done
+          clouds_json+="]"
+
+          [[ "$clouds_json" != "[]" ]] || { echo "At least one cloud required" >&2; exit 1; }
+
+          echo "os_json=$os_json" >> "$GITHUB_OUTPUT"
+          echo "clouds_json=$clouds_json" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve retention parameters
+        id: params
+        shell: bash
+        env:
+          KEEP_PROD_DEFAULT: ${{ vars.KEEP_PROD_IMAGES || '5' }}
+          KEEP_CANDIDATE_DEFAULT: ${{ vars.KEEP_CANDIDATE_IMAGES || '10' }}
+          DRY_RUN_DEFAULT: ${{ vars.RETENTION_DRY_RUN || 'false' }}
+        run: |
+          set -euo pipefail
+
+          keep_prod="${{ inputs.keep_prod || '' }}"
+          keep_candidate="${{ inputs.keep_candidate || '' }}"
+          dry_run="${{ inputs.dry_run || '' }}"
+
+          [[ -n "$keep_prod" ]] || keep_prod="$KEEP_PROD_DEFAULT"
+          [[ -n "$keep_candidate" ]] || keep_candidate="$KEEP_CANDIDATE_DEFAULT"
+          [[ -n "$dry_run" ]] || dry_run="$DRY_RUN_DEFAULT"
+
+          [[ "$keep_prod" =~ ^[0-9]+$ ]] || { echo "keep_prod must be numeric" >&2; exit 1; }
+          [[ "$keep_candidate" =~ ^[0-9]+$ ]] || { echo "keep_candidate must be numeric" >&2; exit 1; }
+          [[ "$dry_run" == "true" || "$dry_run" == "false" ]] || { echo "dry_run must be true or false" >&2; exit 1; }
+
+          echo "keep_prod=$keep_prod" >> "$GITHUB_OUTPUT"
+          echo "keep_candidate=$keep_candidate" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+
+  retention:
+    needs: prep
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.prep.outputs.os_json) }}
+        cloud: ${{ fromJSON(needs.prep.outputs.clouds_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve var file values
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ matrix.os }}" == "rhel9" ]]; then
+            vars_file="images/rhel9/rhel9.auto.pkrvars.hcl"
+          else
+            vars_file="images/win2022/win2022.auto.pkrvars.hcl"
+          fi
+
+          [[ -f "$vars_file" ]] || { echo "Missing var file: $vars_file" >&2; exit 1; }
+
+          get_var() {
+            local key="$1"
+            local file="$2"
+            awk -F= -v k="$key" '
+              $1 ~ "^[[:space:]]*" k "[[:space:]]*$" {
+                v=$2
+                sub(/^[[:space:]]+/, "", v)
+                sub(/[[:space:]]*#.*/, "", v)
+                gsub(/\"/, "", v)
+                gsub(/[[:space:]]+$/, "", v)
+                print v
+                exit
+              }
+            ' "$file"
+          }
+
+          image_name="$(get_var image_name "$vars_file")"
+          aws_region="$(get_var aws_region "$vars_file")"
+          azure_resource_group="$(get_var azure_resource_group "$vars_file")"
+          gcp_project_id="$(get_var gcp_project_id "$vars_file")"
+
+          [[ -n "$image_name" ]] || { echo "image_name missing in $vars_file" >&2; exit 1; }
+
+          echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$aws_region" >> "$GITHUB_OUTPUT"
+          echo "azure_resource_group=$azure_resource_group" >> "$GITHUB_OUTPUT"
+          echo "gcp_project_id=$gcp_project_id" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        if: matrix.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-image-retention
+          aws-region: ${{ steps.vars.outputs.aws_region }}
+
+      - name: Azure login (OIDC)
+        if: matrix.cloud == 'azure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Authenticate to Google Cloud (OIDC)
+        if: matrix.cloud == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        if: matrix.cloud == 'gcp'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run AWS retention
+        if: matrix.cloud == 'aws'
+        shell: bash
+        env:
+          DELETE_AWS_SNAPSHOTS: ${{ vars.AWS_RETENTION_DELETE_SNAPSHOTS || 'false' }}
+        run: |
+          set -euo pipefail
+          dry_run_flag=()
+          delete_snapshots_flag=()
+          if [[ "${{ needs.prep.outputs.dry_run }}" == "true" ]]; then
+            dry_run_flag=(--dry-run)
+          fi
+          if [[ "$DELETE_AWS_SNAPSHOTS" == "true" ]]; then
+            delete_snapshots_flag=(--delete-snapshots)
+          fi
+
+          images/common/scripts/aws/retention-amis.sh \
+            "${dry_run_flag[@]}" \
+            "${delete_snapshots_flag[@]}" \
+            "${{ steps.vars.outputs.aws_region }}" \
+            "${{ steps.vars.outputs.image_name }}" \
+            "${{ needs.prep.outputs.keep_prod }}" \
+            "${{ needs.prep.outputs.keep_candidate }}"
+
+      - name: Run Azure retention
+        if: matrix.cloud == 'azure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dry_run_flag=()
+          if [[ "${{ needs.prep.outputs.dry_run }}" == "true" ]]; then
+            dry_run_flag=(--dry-run)
+          fi
+
+          images/common/scripts/azure/retention-managed-images.sh \
+            "${dry_run_flag[@]}" \
+            "${{ steps.vars.outputs.azure_resource_group }}" \
+            "${{ steps.vars.outputs.image_name }}" \
+            "${{ needs.prep.outputs.keep_prod }}" \
+            "${{ needs.prep.outputs.keep_candidate }}"
+
+      - name: Run GCP retention
+        if: matrix.cloud == 'gcp'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dry_run_flag=()
+          if [[ "${{ needs.prep.outputs.dry_run }}" == "true" ]]; then
+            dry_run_flag=(--dry-run)
+          fi
+
+          images/common/scripts/gcp/retention-images.sh \
+            "${dry_run_flag[@]}" \
+            "${{ steps.vars.outputs.gcp_project_id }}" \
+            "${{ steps.vars.outputs.image_name }}" \
+            "${{ needs.prep.outputs.keep_prod }}" \
+            "${{ needs.prep.outputs.keep_candidate }}"

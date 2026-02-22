@@ -1,0 +1,25 @@
+---
+- name: Determine OS family
+  ansible.builtin.set_fact:
+    _is_windows: "{{ ansible_os_family | lower == 'windows' }}"
+
+- name: Write agents stub file (Linux)
+  when: not _is_windows
+  ansible.builtin.copy:
+    dest: /var/log/image_factory/agents.json
+    mode: "0644"
+    content: |
+      {
+        "note": "This is a stub. Add agent installation steps here.",
+        "expected_agents": {{ common_agents_expected | to_json }}
+      }
+
+- name: Write agents stub file (Windows)
+  when: _is_windows
+  ansible.windows.win_copy:
+    dest: C:\ProgramData\ImageFactory\agents.json
+    content: |
+      {
+        "note": "This is a stub. Add agent installation steps here.",
+        "expected_agents": {{ common_agents_expected | to_json }}
+      }

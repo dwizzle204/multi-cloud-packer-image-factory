@@ -1,0 +1,6 @@
+---
+# Replace with your required endpoint/logging/security agents.
+common_agents_expected:
+  - logging_forwarder
+  - vuln_scanner
+  - endpoint_protection

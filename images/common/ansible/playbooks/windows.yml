@@ -1,0 +1,24 @@
+---
+- name: Configure Windows Server 2022 image baseline + CIS
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/win2022.yml
+
+  pre_tasks:
+    - name: Ensure ImageFactory directory exists
+      ansible.windows.win_file:
+        path: C:\ProgramData\ImageFactory
+        state: directory
+
+  roles:
+    - role: common_baseline
+    - role: ansible-lockdown.windows_2022_cis
+    - role: common_agents_stub
+
+  post_tasks:
+    - name: Write CIS applied marker
+      ansible.windows.win_copy:
+        dest: C:\ProgramData\ImageFactory\cis_applied.txt
+        content: "CIS applied via ansible-lockdown.windows_2022_cis`r`n"

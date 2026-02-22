@@ -1,0 +1,5 @@
+# RHEL9 GCP-only overrides
+gcp_project_id   = "my-project"
+gcp_zone         = "us-central1-a"
+gcp_source_image = "rhel-cloud/rhel-9"
+gcp_image_family = "rhel9-base"

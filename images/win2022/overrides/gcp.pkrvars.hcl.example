@@ -1,0 +1,5 @@
+# Windows 2022 GCP-only overrides
+gcp_project_id   = "my-project"
+gcp_zone         = "us-central1-a"
+gcp_source_image = "windows-cloud/windows-2022"
+gcp_image_family = "win2022-base"

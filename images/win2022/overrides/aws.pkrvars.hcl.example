@@ -1,0 +1,5 @@
+# Windows 2022 AWS-only overrides
+aws_region         = "us-east-1"
+aws_source_ami     = "ami-xxxxxxxxxxxxxxxxx"
+aws_instance_type  = "t3.large"
+aws_winrm_username = "Administrator"
