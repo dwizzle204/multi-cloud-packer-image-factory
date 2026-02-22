@@ -2,6 +2,23 @@
 
 All notable changes to this template are documented in this file.
 
+## 0.5.0 - 2026-02-22
+
+### Added
+- Added catalog-driven image definition model:
+  - `images/catalog/images.json`
+  - `scripts/catalog/images.sh`
+- Added workflow documentation comments across all workflow files to improve maintainability for template users.
+
+### Changed
+- Refactored build workflow to resolve image/cloud matrix from catalog instead of hardcoded OS branches.
+- Refactored promote workflow to resolve per-image var paths and metadata from catalog.
+- Refactored retention workflow to resolve dynamic image scope from catalog.
+- Updated docs to describe catalog-based extension path for adding image types:
+  - `README.md`
+  - `TEMPLATE_USAGE.md`
+  - `docs/repository-structure.md`
+
 ## 0.4.3 - 2026-02-22
 
 ### Changed

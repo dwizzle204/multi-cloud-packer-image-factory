@@ -1,6 +1,7 @@
 name: Image Terratest
 
 on:
+  # Manual trigger so operators can validate a specific built image ID.
   workflow_dispatch:
     inputs:
       cloud:
@@ -29,6 +30,7 @@ permissions:
 
 jobs:
   terratest:
+    # Launches ephemeral test infrastructure and validates runtime behavior.
     runs-on: ubuntu-latest
     steps:
       - name: Validate inputs

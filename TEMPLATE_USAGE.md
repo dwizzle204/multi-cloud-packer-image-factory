@@ -56,6 +56,10 @@ This guide focuses on what to change versus what to keep stable so the template 
 
 ## Recommended extension points
 
+- Add new image types by:
+  - creating a new `images/<image-key>/` folder
+  - adding one entry in `images/catalog/images.json`
+  - reusing existing workflow logic (no workflow branch edits required)
 - Add organization agents under `images/common/ansible/roles/common_agents_stub/`
 - Add deeper compliance checks under `tests/compliance/`
 - Add replication and distribution actions in promotion workflow/scripts

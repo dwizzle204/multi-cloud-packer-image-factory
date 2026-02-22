@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       os:
-        description: "OS: rhel9 | win2022"
+        description: "Image key from catalog (for example: rhel9 | win2022)"
         required: true
         default: "rhel9"
       cloud:
-        description: "Cloud: aws | azure | gcp"
+        description: "Cloud target: aws | azure | gcp"
         required: true
         default: "azure"
       image_version:
@@ -25,26 +25,24 @@ permissions:
 
 jobs:
   promote:
+    # Promotion is metadata-only and intentionally never rebuilds images.
     runs-on: ubuntu-latest
     environment: prod
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve var file and image identifiers
+      - name: Resolve catalog values and image identifiers
         id: vars
         shell: bash
         run: |
           set -euo pipefail
 
-          case "${{ inputs.os }}" in
-            rhel9) vars_file="images/rhel9/rhel9.auto.pkrvars.hcl" ;;
-            win2022) vars_file="images/win2022/win2022.auto.pkrvars.hcl" ;;
-            *)
-              echo "Invalid os input. Allowed: rhel9, win2022" >&2
-              exit 1
-              ;;
-          esac
+          image_key="${{ inputs.os }}"
+          cloud="${{ inputs.cloud }}"
+
+          vars_file="$(scripts/catalog/images.sh get "$image_key" vars_file)"
+          scripts/catalog/images.sh builder "$image_key" "$cloud" >/dev/null
 
           if [[ ! -f "$vars_file" ]]; then
             echo "Missing required file: $vars_file" >&2
@@ -72,13 +70,12 @@ jobs:
           azure_resource_group="$(get_var azure_resource_group "$vars_file")"
           gcp_project_id="$(get_var gcp_project_id "$vars_file")"
 
-          if [[ "${{ inputs.cloud }}" == "gcp" ]]; then
-            image_full_name="${image_name}-${{ inputs.image_version }}"
+          image_full_name="${image_name}-${{ inputs.image_version }}"
+          if [[ "$cloud" == "gcp" ]]; then
             image_full_name="${image_full_name//./-}"
-          else
-            image_full_name="${image_name}-${{ inputs.image_version }}"
           fi
 
+          echo "image_key=$image_key" >> "$GITHUB_OUTPUT"
           echo "vars_file=$vars_file" >> "$GITHUB_OUTPUT"
           echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
           echo "image_full_name=$image_full_name" >> "$GITHUB_OUTPUT"
@@ -172,8 +169,8 @@ jobs:
             artifact_id="${{ steps.promote_gcp.outputs.artifact_id }}"
           fi
 
-          cat > promotion-summary.env <<EOF
-          os=${{ inputs.os }}
+          cat > promotion-summary.env <<EOF_SUMMARY
+          os=${{ steps.vars.outputs.image_key }}
           cloud=${{ inputs.cloud }}
           image_name=${{ steps.vars.outputs.image_name }}
           image_full_name=${{ steps.vars.outputs.image_full_name }}
@@ -182,10 +179,10 @@ jobs:
           artifact_id=${artifact_id}
           promoted_by=${{ github.actor }}
           promoted_run=${{ github.run_id }}
-          EOF
+          EOF_SUMMARY
 
       - name: Upload promotion summary
         uses: actions/upload-artifact@v4
         with:
-          name: promote-${{ inputs.os }}-${{ inputs.cloud }}-${{ inputs.image_version }}
+          name: promote-${{ steps.vars.outputs.image_key }}-${{ inputs.cloud }}-${{ inputs.image_version }}
           path: promotion-summary.env

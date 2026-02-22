@@ -1,6 +1,7 @@
 name: Terratest OS Examples
 
 on:
+  # Manual trigger for SSH/WinRM examples against existing hosts.
   workflow_dispatch:
     inputs:
       target:
@@ -13,6 +14,7 @@ permissions:
 
 jobs:
   run-os-example:
+    # Purposefully lightweight examples for quick, targeted validation.
     runs-on: ubuntu-latest
     steps:
       - name: Validate target

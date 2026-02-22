@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       os:
-        description: "OS to build: rhel9 | win2022 | all"
+        description: "Image key from catalog (for example: rhel9, win2022, or all)"
         required: true
         default: "rhel9"
       clouds:
@@ -38,21 +38,24 @@ permissions:
 
 jobs:
   prep:
+    # Compute build matrix and normalized runtime inputs from the image catalog.
     runs-on: ubuntu-latest
     outputs:
       image_version: ${{ steps.version.outputs.image_version }}
-      clouds_json: ${{ steps.clouds.outputs.clouds_json }}
-      os_json: ${{ steps.os.outputs.os_json }}
+      matrix_json: ${{ steps.matrix.outputs.matrix_json }}
       channel: ${{ steps.inputs.outputs.channel }}
       run_terratest: ${{ steps.inputs.outputs.run_terratest }}
       publish_cis_sarif: ${{ steps.inputs.outputs.publish_cis_sarif }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Resolve event inputs with defaults
         id: inputs
         shell: bash
         run: |
           set -euo pipefail
-          os_input="${{ inputs.os || 'all' }}"
+          image_selector="${{ inputs.os || 'all' }}"
           clouds_input="${{ inputs.clouds || 'aws,azure,gcp' }}"
           channel_input="${{ inputs.channel || 'candidate' }}"
           image_version_input="${{ inputs.image_version || '' }}"
@@ -82,7 +85,7 @@ jobs:
             exit 1
           fi
 
-          echo "os=$os_input" >> "$GITHUB_OUTPUT"
+          echo "image_selector=$image_selector" >> "$GITHUB_OUTPUT"
           echo "clouds=$clouds_input" >> "$GITHUB_OUTPUT"
           echo "channel=$channel_input" >> "$GITHUB_OUTPUT"
           echo "image_version=$image_version_input" >> "$GITHUB_OUTPUT"
@@ -112,48 +115,17 @@ jobs:
             exit 1
           fi
 
-      - name: Parse clouds input
-        id: clouds
+      - name: Build matrix from image catalog
+        id: matrix
         shell: bash
         run: |
           set -euo pipefail
-          IFS=',' read -ra arr <<< "${{ steps.inputs.outputs.clouds }}"
-          json="["
-          first=1
-          for c in "${arr[@]}"; do
-            c="$(echo "$c" | xargs)"
-            [[ -z "$c" ]] && continue
-            if [[ "$c" != "aws" && "$c" != "azure" && "$c" != "gcp" ]]; then
-              echo "Invalid cloud '$c'. Allowed: aws, azure, gcp" >&2
-              exit 1
-            fi
-            if [[ $first -eq 0 ]]; then
-              json+=", "
-            fi
-            first=0
-            json+="\"$c\""
-          done
-          json+="]"
-          if [[ "$json" == "[]" ]]; then
-            echo "At least one cloud must be provided." >&2
+          matrix_json="$(scripts/catalog/images.sh matrix "${{ steps.inputs.outputs.image_selector }}" "${{ steps.inputs.outputs.clouds }}")"
+          [[ "$matrix_json" != "[]" ]] || {
+            echo "Catalog selection resolved to an empty matrix" >&2
             exit 1
-          fi
-          echo "clouds_json=$json" >> "$GITHUB_OUTPUT"
-
-      - name: Parse OS selection
-        id: os
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "${{ steps.inputs.outputs.os }}" in
-            all) echo 'os_json=["rhel9","win2022"]' >> "$GITHUB_OUTPUT" ;;
-            rhel9) echo 'os_json=["rhel9"]' >> "$GITHUB_OUTPUT" ;;
-            win2022) echo 'os_json=["win2022"]' >> "$GITHUB_OUTPUT" ;;
-            *)
-              echo "Invalid os input. Allowed: rhel9, win2022, all" >&2
-              exit 1
-              ;;
-          esac
+          }
+          echo "matrix_json=$matrix_json" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prep
@@ -161,33 +133,42 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.prep.outputs.os_json) }}
-        cloud: ${{ fromJSON(needs.prep.outputs.clouds_json) }}
+        # Matrix is catalog-driven to keep workflow logic stable as new image types are added.
+        include: ${{ fromJSON(needs.prep.outputs.matrix_json) }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve OS var file and required values
+      - name: Resolve image metadata and required values
         id: vars
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ "${{ matrix.os }}" == "rhel9" ]]; then
-            vars_file="images/rhel9/rhel9.auto.pkrvars.hcl"
-            override_file="images/rhel9/overrides/${{ matrix.cloud }}.pkrvars.hcl"
-            override_file_rel="overrides/${{ matrix.cloud }}.pkrvars.hcl"
-          else
-            vars_file="images/win2022/win2022.auto.pkrvars.hcl"
-            override_file="images/win2022/overrides/${{ matrix.cloud }}.pkrvars.hcl"
-            override_file_rel="overrides/${{ matrix.cloud }}.pkrvars.hcl"
-          fi
+          image_key="${{ matrix.image_key }}"
+          cloud="${{ matrix.cloud }}"
+
+          workdir="$(scripts/catalog/images.sh get "$image_key" workdir)"
+          vars_file="$(scripts/catalog/images.sh get "$image_key" vars_file)"
+          override_dir="$(scripts/catalog/images.sh get "$image_key" override_dir)"
+          builder_target="$(scripts/catalog/images.sh builder "$image_key" "$cloud")"
+          os_type="$(scripts/catalog/images.sh get "$image_key" os_type)"
+          cis_role="$(scripts/catalog/images.sh get "$image_key" cis_role)"
 
           if [[ ! -f "$vars_file" ]]; then
             echo "Missing required file: $vars_file" >&2
             echo "Create it from its .example file and commit/prepare it for your environment." >&2
             exit 1
+          fi
+
+          override_file="$override_dir/${cloud}.pkrvars.hcl"
+          override_file_rel="overrides/${cloud}.pkrvars.hcl"
+          if [[ -f "$override_file" ]]; then
+            use_override="true"
+          else
+            use_override="false"
+            override_file_rel=""
           fi
 
           get_var() {
@@ -216,16 +197,15 @@ jobs:
           [[ -n "$azure_resource_group" ]] || { echo "azure_resource_group missing in $vars_file" >&2; exit 1; }
           [[ -n "$gcp_project_id" ]] || { echo "gcp_project_id missing in $vars_file" >&2; exit 1; }
 
-          if [[ -f "$override_file" ]]; then
-            use_override="true"
-          else
-            use_override="false"
-            override_file_rel=""
-          fi
-
+          echo "image_key=$image_key" >> "$GITHUB_OUTPUT"
+          echo "cloud=$cloud" >> "$GITHUB_OUTPUT"
+          echo "workdir=$workdir" >> "$GITHUB_OUTPUT"
           echo "vars_file=$vars_file" >> "$GITHUB_OUTPUT"
           echo "override_file_rel=$override_file_rel" >> "$GITHUB_OUTPUT"
           echo "use_override=$use_override" >> "$GITHUB_OUTPUT"
+          echo "builder_target=$builder_target" >> "$GITHUB_OUTPUT"
+          echo "os_type=$os_type" >> "$GITHUB_OUTPUT"
+          echo "cis_role=$cis_role" >> "$GITHUB_OUTPUT"
           echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
           echo "aws_region=$aws_region" >> "$GITHUB_OUTPUT"
           echo "azure_resource_group=$azure_resource_group" >> "$GITHUB_OUTPUT"
@@ -285,28 +265,18 @@ jobs:
           VARS_FILE: ${{ steps.vars.outputs.vars_file }}
           OVERRIDE_FILE_REL: ${{ steps.vars.outputs.override_file_rel }}
           USE_OVERRIDE: ${{ steps.vars.outputs.use_override }}
+          WORKDIR: ${{ steps.vars.outputs.workdir }}
+          BUILDER_TARGET: ${{ steps.vars.outputs.builder_target }}
+          IMAGE_KEY: ${{ steps.vars.outputs.image_key }}
         run: |
           set -euo pipefail
 
-          if [[ "${{ matrix.os }}" == "rhel9" ]]; then
-            workdir="images/rhel9"
-            template_vars="../common/packer/variables.pkr.hcl rhel9.variables.pkr.hcl rhel9.pkr.hcl ../common/packer/locals.pkr.hcl"
-            case "${{ matrix.cloud }}" in
-              aws) only_target="source.amazon-ebs.rhel9_aws" ;;
-              azure) only_target="source.azure-arm.rhel9_azure" ;;
-              gcp) only_target="source.googlecompute.rhel9_gcp" ;;
-            esac
-          else
-            workdir="images/win2022"
-            template_vars="../common/packer/variables.pkr.hcl win2022.variables.pkr.hcl win2022.pkr.hcl ../common/packer/locals.pkr.hcl"
-            case "${{ matrix.cloud }}" in
-              aws) only_target="source.amazon-ebs.win2022_aws" ;;
-              azure) only_target="source.azure-arm.win2022_azure" ;;
-              gcp) only_target="source.googlecompute.win2022_gcp" ;;
-            esac
-          fi
+          cd "$WORKDIR"
 
-          cd "$workdir"
+          template_files=()
+          while IFS= read -r file; do
+            template_files+=("$file")
+          done < <(../../scripts/catalog/images.sh template-files "$IMAGE_KEY")
 
           vars_file_local="$(basename "$VARS_FILE")"
           [[ -f "$vars_file_local" ]] || { echo "Missing var file in workdir: $vars_file_local" >&2; exit 1; }
@@ -314,7 +284,7 @@ jobs:
 
           if [[ "$USE_OVERRIDE" == "true" ]]; then
             [[ -f "$OVERRIDE_FILE_REL" ]] || { echo "Missing override file in workdir: $OVERRIDE_FILE_REL" >&2; exit 1; }
-            var_flags+=(-var-file="$OVERRIDE_FILE_REL")
+            var_flags+=( -var-file="$OVERRIDE_FILE_REL" )
           fi
 
           packer init ../common/packer/versions.pkr.hcl
@@ -326,36 +296,36 @@ jobs:
             -var "channel=$CHANNEL" \
             -var "git_sha=$GIT_SHA" \
             -var "build_date=$BUILD_DATE" \
-            $template_vars
+            "${template_files[@]}"
 
           packer build \
             -machine-readable \
-            -only="$only_target" \
+            -only="$BUILDER_TARGET" \
             "${var_flags[@]}" \
             -var "image_version=$IMAGE_VERSION" \
             -var "channel=$CHANNEL" \
             -var "git_sha=$GIT_SHA" \
             -var "build_date=$BUILD_DATE" \
-            $template_vars | tee packer-output.csv
+            "${template_files[@]}" | tee packer-output.csv
 
           artifact_id="$(grep ',artifact,.*id,' packer-output.csv | tail -n1 | awk -F, '{print $NF}')"
           [[ -n "$artifact_id" ]] || { echo "Could not detect artifact id from Packer output" >&2; exit 1; }
 
           echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
-          echo "only_target=$only_target" >> "$GITHUB_OUTPUT"
+          echo "only_target=$BUILDER_TARGET" >> "$GITHUB_OUTPUT"
 
-          cat > artifact-metadata.env <<EOF
-          os=${{ matrix.os }}
+          cat > artifact-metadata.env <<EOF_META
+          os=$IMAGE_KEY
           cloud=${{ matrix.cloud }}
           image_name=${{ steps.vars.outputs.image_name }}
           image_version=$IMAGE_VERSION
           channel=$CHANNEL
           artifact_id=$artifact_id
-          packer_target=$only_target
+          packer_target=$BUILDER_TARGET
           vars_file=$vars_file_local
           override_file=${OVERRIDE_FILE_REL:-none}
           git_sha=$GIT_SHA
-          EOF
+          EOF_META
 
       - name: Generate build evidence artifacts
         shell: bash
@@ -364,48 +334,50 @@ jobs:
           CHANNEL: ${{ needs.prep.outputs.channel }}
           GIT_SHA: ${{ github.sha }}
           BUILD_DATE: ${{ github.run_started_at }}
+          WORKDIR: ${{ steps.vars.outputs.workdir }}
+          CIS_ROLE: ${{ steps.vars.outputs.cis_role }}
         run: |
           set -euo pipefail
 
-          mkdir -p "images/${{ matrix.os }}/build-artifacts/logs"
-          cp "images/${{ matrix.os }}/packer-output.csv" "images/${{ matrix.os }}/build-artifacts/logs/packer-output.csv"
+          mkdir -p "$WORKDIR/build-artifacts/logs"
+          cp "$WORKDIR/packer-output.csv" "$WORKDIR/build-artifacts/logs/packer-output.csv"
 
           # Build-level manifest artifact for CI traceability.
-          cat > "images/${{ matrix.os }}/build-artifacts/manifest.json" <<EOF
+          cat > "$WORKDIR/build-artifacts/manifest.json" <<EOF_MANIFEST
           {
             "image_name": "${{ steps.vars.outputs.image_name }}",
             "image_version": "${IMAGE_VERSION}",
             "git_sha": "${GIT_SHA}",
             "build_date": "${BUILD_DATE}",
             "channel": "${CHANNEL}",
-            "os": "${{ matrix.os }}",
+            "os": "${{ steps.vars.outputs.image_key }}",
             "cloud": "${{ matrix.cloud }}",
             "artifact_id": "${{ steps.packer.outputs.artifact_id }}"
           }
-          EOF
+          EOF_MANIFEST
 
           # CIS summary artifact derived from build evidence (role completion marker pattern).
           cis_role_signal="not-detected"
           cis_marker_signal="not-detected"
-          if grep -qi "ansible-lockdown" "images/${{ matrix.os }}/packer-output.csv"; then
+          if grep -qi "ansible-lockdown" "$WORKDIR/packer-output.csv"; then
             cis_role_signal="detected-in-build-log"
           fi
-          if grep -qi "CIS applied via" "images/${{ matrix.os }}/packer-output.csv"; then
+          if grep -qi "CIS applied via" "$WORKDIR/packer-output.csv"; then
             cis_marker_signal="detected-in-build-log"
           fi
 
-          cat > "images/${{ matrix.os }}/build-artifacts/cis-report.json" <<EOF
+          cat > "$WORKDIR/build-artifacts/cis-report.json" <<EOF_CIS
           {
             "status": "informational",
-            "os": "${{ matrix.os }}",
+            "os": "${{ steps.vars.outputs.image_key }}",
             "cloud": "${{ matrix.cloud }}",
             "image_version": "${IMAGE_VERSION}",
-            "cis_role_expected": "$(if [[ "${{ matrix.os }}" == "rhel9" ]]; then echo "ansible-lockdown.rhel9_cis"; else echo "ansible-lockdown.windows_2022_cis"; fi)",
+            "cis_role_expected": "${CIS_ROLE}",
             "cis_role_signal": "${cis_role_signal}",
             "cis_marker_signal": "${cis_marker_signal}",
             "notes": "Template-level informational summary. Treat this as signal-only and add authoritative compliance tooling for enforcement."
           }
-          EOF
+          EOF_CIS
 
       - name: Setup Go
         if: needs.prep.outputs.run_terratest == 'true'
@@ -438,7 +410,7 @@ jobs:
         working-directory: tests/terratest
         shell: bash
         env:
-          TEST_OS_TYPE: ${{ matrix.os == 'win2022' && 'windows' || 'linux' }}
+          TEST_OS_TYPE: ${{ steps.vars.outputs.os_type }}
           TERRATEST_ENABLE_AWS: ${{ matrix.cloud == 'aws' && 'true' || 'false' }}
           TERRATEST_ENABLE_AZURE: ${{ matrix.cloud == 'azure' && 'true' || 'false' }}
           TERRATEST_ENABLE_GCP: ${{ matrix.cloud == 'gcp' && 'true' || 'false' }}
@@ -467,20 +439,22 @@ jobs:
         if: needs.prep.outputs.run_terratest == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: terratest-${{ matrix.os }}-${{ matrix.cloud }}-${{ needs.prep.outputs.image_version }}
+          name: terratest-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}-${{ needs.prep.outputs.image_version }}
           path: tests/terratest/terratest.log
 
       - name: Generate CIS SARIF
         if: needs.prep.outputs.publish_cis_sarif == 'true'
         shell: bash
+        env:
+          WORKDIR: ${{ steps.vars.outputs.workdir }}
         run: |
           set -euo pipefail
-          cis_json="images/${{ matrix.os }}/build-artifacts/cis-report.json"
-          sarif_out="images/${{ matrix.os }}/build-artifacts/cis-report.sarif"
+          cis_json="$WORKDIR/build-artifacts/cis-report.json"
+          sarif_out="$WORKDIR/build-artifacts/cis-report.sarif"
 
           [[ -f "$cis_json" ]] || { echo "Missing CIS report: $cis_json" >&2; exit 1; }
 
-          status="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1], "r", encoding="utf-8")).get("status") or "unknown").lower())' "$cis_json")"
+          status="$(jq -r '(.status // "unknown") | ascii_downcase' "$cis_json")"
 
           level="note"
           case "$status" in
@@ -489,7 +463,7 @@ jobs:
             *) level="warning" ;;
           esac
 
-          cat > "$sarif_out" <<EOF
+          cat > "$sarif_out" <<EOF_SARIF
           {
             "version": "2.1.0",
             "\$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -501,7 +475,7 @@ jobs:
                     "informationUri": "https://github.com/${{ github.repository }}",
                     "rules": [
                       {
-                        "id": "CIS-SUMMARY-${{ matrix.os }}-${{ matrix.cloud }}",
+                        "id": "CIS-SUMMARY-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}",
                         "name": "CIS summary signal",
                         "shortDescription": { "text": "CIS template summary for image build" },
                         "helpUri": "https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/cis.md"
@@ -511,16 +485,16 @@ jobs:
                 },
                 "results": [
                   {
-                    "ruleId": "CIS-SUMMARY-${{ matrix.os }}-${{ matrix.cloud }}",
+                    "ruleId": "CIS-SUMMARY-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}",
                     "level": "$level",
                     "message": {
-                      "text": "CIS summary status for ${{ matrix.os }}/${{ matrix.cloud }} is '$status'. See uploaded build artifacts for raw details."
+                      "text": "CIS summary status for ${{ steps.vars.outputs.image_key }}/${{ matrix.cloud }} is '$status'. See uploaded build artifacts for raw details."
                     },
                     "locations": [
                       {
                         "physicalLocation": {
                           "artifactLocation": {
-                            "uri": "images/${{ matrix.os }}/build-artifacts/cis-report.json"
+                            "uri": "$WORKDIR/build-artifacts/cis-report.json"
                           }
                         }
                       }
@@ -530,23 +504,25 @@ jobs:
               }
             ]
           }
-          EOF
+          EOF_SARIF
 
       - name: Publish build summary
         shell: bash
+        env:
+          WORKDIR: ${{ steps.vars.outputs.workdir }}
         run: |
           set -euo pipefail
-          manifest_json="images/${{ matrix.os }}/build-artifacts/manifest.json"
-          cis_json="images/${{ matrix.os }}/build-artifacts/cis-report.json"
+          manifest_json="$WORKDIR/build-artifacts/manifest.json"
+          cis_json="$WORKDIR/build-artifacts/cis-report.json"
 
-          image_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], "r", encoding="utf-8")).get("image_name","unknown"))' "$manifest_json")"
-          image_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], "r", encoding="utf-8")).get("image_version","unknown"))' "$manifest_json")"
-          artifact_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], "r", encoding="utf-8")).get("artifact_id","unknown"))' "$manifest_json")"
-          cis_status="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1], "r", encoding="utf-8")).get("status") or "unknown"))' "$cis_json")"
-          cis_signal="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1], "r", encoding="utf-8")).get("cis_marker_signal") or "unknown"))' "$cis_json")"
+          image_name="$(jq -r '.image_name // "unknown"' "$manifest_json")"
+          image_version="$(jq -r '.image_version // "unknown"' "$manifest_json")"
+          artifact_id="$(jq -r '.artifact_id // "unknown"' "$manifest_json")"
+          cis_status="$(jq -r '.status // "unknown"' "$cis_json")"
+          cis_signal="$(jq -r '.cis_marker_signal // "unknown"' "$cis_json")"
 
           {
-            echo "## Image Build Summary: ${{ matrix.os }} / ${{ matrix.cloud }}"
+            echo "## Image Build Summary: ${{ steps.vars.outputs.image_key }} / ${{ matrix.cloud }}"
             echo ""
             echo "| Field | Value |"
             echo "|---|---|"
@@ -564,17 +540,17 @@ jobs:
         if: needs.prep.outputs.publish_cis_sarif == 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: images/${{ matrix.os }}/build-artifacts/cis-report.sarif
-          category: cis-${{ matrix.os }}-${{ matrix.cloud }}
+          sarif_file: ${{ steps.vars.outputs.workdir }}/build-artifacts/cis-report.sarif
+          category: cis-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ matrix.os }}-${{ matrix.cloud }}-${{ needs.prep.outputs.image_version }}
+          name: build-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}-${{ needs.prep.outputs.image_version }}
           path: |
-            images/${{ matrix.os }}/packer-output.csv
-            images/${{ matrix.os }}/artifact-metadata.env
-            images/${{ matrix.os }}/build-artifacts/manifest.json
-            images/${{ matrix.os }}/build-artifacts/cis-report.json
-            images/${{ matrix.os }}/build-artifacts/cis-report.sarif
-            images/${{ matrix.os }}/build-artifacts/logs/**
+            ${{ steps.vars.outputs.workdir }}/packer-output.csv
+            ${{ steps.vars.outputs.workdir }}/artifact-metadata.env
+            ${{ steps.vars.outputs.workdir }}/build-artifacts/manifest.json
+            ${{ steps.vars.outputs.workdir }}/build-artifacts/cis-report.json
+            ${{ steps.vars.outputs.workdir }}/build-artifacts/cis-report.sarif
+            ${{ steps.vars.outputs.workdir }}/build-artifacts/logs/**

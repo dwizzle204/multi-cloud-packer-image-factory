@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       os:
-        description: "OS scope: rhel9 | win2022 | all"
+        description: "Image key scope from catalog (single key, comma list, or all)"
         required: true
         default: "all"
       clouds:
@@ -33,53 +33,33 @@ permissions:
 
 jobs:
   prep:
+    # Resolve dynamic image/cloud scope from catalog and validate parameters.
     runs-on: ubuntu-latest
     outputs:
-      os_json: ${{ steps.scope.outputs.os_json }}
-      clouds_json: ${{ steps.scope.outputs.clouds_json }}
+      matrix_json: ${{ steps.scope.outputs.matrix_json }}
       keep_prod: ${{ steps.params.outputs.keep_prod }}
       keep_candidate: ${{ steps.params.outputs.keep_candidate }}
       dry_run: ${{ steps.params.outputs.dry_run }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Resolve scope defaults
         id: scope
         shell: bash
         run: |
           set -euo pipefail
 
-          os_input="${{ inputs.os || 'all' }}"
+          image_selector="${{ inputs.os || 'all' }}"
           clouds_input="${{ inputs.clouds || 'aws,azure,gcp' }}"
 
-          case "$os_input" in
-            all) os_json='["rhel9","win2022"]' ;;
-            rhel9) os_json='["rhel9"]' ;;
-            win2022) os_json='["win2022"]' ;;
-            *)
-              echo "Invalid os input. Allowed: rhel9, win2022, all" >&2
-              exit 1
-              ;;
-          esac
+          matrix_json="$(scripts/catalog/images.sh matrix "$image_selector" "$clouds_input")"
+          [[ "$matrix_json" != "[]" ]] || {
+            echo "Catalog selection resolved to an empty matrix" >&2
+            exit 1
+          }
 
-          IFS=',' read -ra arr <<< "$clouds_input"
-          clouds_json="["
-          first=1
-          for c in "${arr[@]}"; do
-            c="$(echo "$c" | xargs)"
-            [[ -z "$c" ]] && continue
-            if [[ "$c" != "aws" && "$c" != "azure" && "$c" != "gcp" ]]; then
-              echo "Invalid cloud '$c'. Allowed: aws, azure, gcp" >&2
-              exit 1
-            fi
-            if [[ $first -eq 0 ]]; then clouds_json+=", "; fi
-            first=0
-            clouds_json+="\"$c\""
-          done
-          clouds_json+="]"
-
-          [[ "$clouds_json" != "[]" ]] || { echo "At least one cloud required" >&2; exit 1; }
-
-          echo "os_json=$os_json" >> "$GITHUB_OUTPUT"
-          echo "clouds_json=$clouds_json" >> "$GITHUB_OUTPUT"
+          echo "matrix_json=$matrix_json" >> "$GITHUB_OUTPUT"
 
       - name: Resolve retention parameters
         id: params
@@ -113,8 +93,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.prep.outputs.os_json) }}
-        cloud: ${{ fromJSON(needs.prep.outputs.clouds_json) }}
+        # Matrix is catalog-driven for easier onboarding of new image types.
+        include: ${{ fromJSON(needs.prep.outputs.matrix_json) }}
 
     steps:
       - name: Checkout
@@ -126,11 +106,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${{ matrix.os }}" == "rhel9" ]]; then
-            vars_file="images/rhel9/rhel9.auto.pkrvars.hcl"
-          else
-            vars_file="images/win2022/win2022.auto.pkrvars.hcl"
-          fi
+          image_key="${{ matrix.image_key }}"
+          vars_file="$(scripts/catalog/images.sh get "$image_key" vars_file)"
 
           [[ -f "$vars_file" ]] || { echo "Missing var file: $vars_file" >&2; exit 1; }
 
@@ -157,6 +134,7 @@ jobs:
 
           [[ -n "$image_name" ]] || { echo "image_name missing in $vars_file" >&2; exit 1; }
 
+          echo "image_key=$image_key" >> "$GITHUB_OUTPUT"
           echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
           echo "aws_region=$aws_region" >> "$GITHUB_OUTPUT"
           echo "azure_resource_group=$azure_resource_group" >> "$GITHUB_OUTPUT"

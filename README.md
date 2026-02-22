@@ -57,7 +57,9 @@ See `docs/architecture.md`.
 ## Repository map
 
 - `.github/workflows/` - build, test, promote, retention pipelines
+- `images/catalog/images.json` - catalog-driven image definitions used by workflows
 - `images/` - Packer templates, shared scripts, and Ansible content
+- `scripts/catalog/images.sh` - workflow resolver for catalog selection and matrix generation
 - `docs/` - setup, security, architecture, and operations documentation
   - `docs/repository-governance.md` - branch protection and review policy recommendations
 - `tests/` - smoke/compliance scripts, Terratest examples, validators

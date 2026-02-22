@@ -24,10 +24,17 @@
 
 - `images/common/`
   - shared Packer config, Ansible content, helper scripts
+- `images/catalog/images.json`
+  - central image catalog used by workflows to build matrix scope and per-image settings
 - `images/rhel9/`
   - RHEL 9 Packer templates and vars
 - `images/win2022/`
   - Windows Server 2022 Packer templates and vars
+
+## Catalog tooling
+
+- `scripts/catalog/images.sh`
+  - resolves image keys, matrix scope, template files, and cloud builder targets for workflows
 
 ## Required local runtime files
 
