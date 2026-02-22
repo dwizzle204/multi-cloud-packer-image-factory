@@ -43,6 +43,8 @@ See `docs/architecture.md`.
 ## Lifecycle workflows
 
 - **Build** (`image-build.yml`)
+  - Thin trigger wrapper that calls reusable build logic
+- **Reusable Build** (`reusable-image-build.yml`)
   - Builds images by OS x cloud matrix
   - Produces `manifest.json`, `cis-report.json`, and logs as artifacts
   - Optionally runs Terratest

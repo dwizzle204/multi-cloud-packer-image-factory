@@ -4,6 +4,7 @@ set -euo pipefail
 # Static repository-level checks that do not require launching cloud instances.
 tests/ci/validate-template.sh
 tests/ci/validate-workflows.sh
+tests/ci/lint-workflows.sh
 
 # Script syntax checks.
 bash -n tests/smoke/linux-smoke.sh

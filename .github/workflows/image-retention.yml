@@ -31,6 +31,11 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  # Avoid overlapping retention windows with the same scope.
+  group: ${{ github.repository }}-${{ github.ref_name }}-retention-${{ github.event.inputs.os || 'all' }}-${{ github.event.inputs.clouds || 'aws,azure,gcp' }}
+  cancel-in-progress: false
+
 jobs:
   prep:
     # Resolve dynamic image/cloud scope from catalog and validate parameters.
@@ -44,14 +49,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Ensure jq is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
       - name: Resolve scope defaults
         id: scope
         shell: bash
         run: |
           set -euo pipefail
 
-          image_selector="${{ inputs.os || 'all' }}"
-          clouds_input="${{ inputs.clouds || 'aws,azure,gcp' }}"
+          image_selector="${{ github.event.inputs.os || 'all' }}"
+          clouds_input="${{ github.event.inputs.clouds || 'aws,azure,gcp' }}"
 
           matrix_json="$(scripts/catalog/images.sh matrix "$image_selector" "$clouds_input")"
           [[ "$matrix_json" != "[]" ]] || {
@@ -71,9 +85,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          keep_prod="${{ inputs.keep_prod || '' }}"
-          keep_candidate="${{ inputs.keep_candidate || '' }}"
-          dry_run="${{ inputs.dry_run || '' }}"
+          keep_prod="${{ github.event.inputs.keep_prod || '' }}"
+          keep_candidate="${{ github.event.inputs.keep_candidate || '' }}"
+          dry_run="${{ github.event.inputs.dry_run || '' }}"
 
           [[ -n "$keep_prod" ]] || keep_prod="$KEEP_PROD_DEFAULT"
           [[ -n "$keep_candidate" ]] || keep_candidate="$KEEP_CANDIDATE_DEFAULT"
@@ -90,6 +104,10 @@ jobs:
   retention:
     needs: prep
     runs-on: ubuntu-latest
+    concurrency:
+      # Serialize retention execution for identical image+cloud pairs.
+      group: ${{ github.repository }}-${{ github.ref_name }}-retention-job-${{ matrix.image_key }}-${{ matrix.cloud }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +117,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Ensure jq is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
 
       - name: Resolve var file values
         id: vars

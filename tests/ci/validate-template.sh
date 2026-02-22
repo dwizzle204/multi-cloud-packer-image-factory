@@ -17,9 +17,13 @@ required_files=(
   "images/win2022/win2022.pkr.hcl"
   "images/common/ansible/requirements.yml"
   ".github/workflows/image-build.yml"
+  ".github/workflows/reusable-image-build.yml"
   ".github/workflows/image-promote.yml"
   ".github/workflows/image-terratest.yml"
   ".github/workflows/terratest-os-examples.yml"
+  "tests/ci/lint-workflows.sh"
+  "images/catalog/images.json"
+  "scripts/catalog/images.sh"
   "Makefile"
 )
 

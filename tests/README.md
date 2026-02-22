@@ -5,9 +5,10 @@ This directory contains:
 - `smoke/`: in-instance verification for built Linux/Windows images.
 - `compliance/`: summary generation from manifest + CIS marker artifacts.
 - `ci/`: repository/workflow static checks for template integrity.
+  - includes semantic GitHub Actions linting via `lint-workflows.sh` (`actionlint`)
 - `terratest/`: example Terraform + Terratest integration tests for AWS/Azure/GCP image launch validation.
 - `run-all.sh`: local runner for static checks.
- - `Makefile` (repo root): shortcuts for local test commands.
+- `Makefile` (repo root): shortcuts for local test commands.
 
 ## Quick usage
 

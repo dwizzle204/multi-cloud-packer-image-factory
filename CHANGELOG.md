@@ -2,6 +2,30 @@
 
 All notable changes to this template are documented in this file.
 
+## 0.5.1 - 2026-02-22
+
+### Added
+- Added reusable build workflow implementation:
+  - `.github/workflows/reusable-image-build.yml`
+- Added workflow/job concurrency controls to prevent overlapping runs on the same image targets:
+  - build, promote, retention, and Terratest workflows
+- Added semantic GitHub Actions linting:
+  - `tests/ci/lint-workflows.sh` (`actionlint`)
+  - integrated into `tests/run-all.sh`
+
+### Changed
+- Converted `image-build.yml` into a thin wrapper that calls `reusable-image-build.yml`.
+- Added explicit `jq` availability checks in catalog-dependent workflows:
+  - `reusable-image-build.yml`
+  - `image-promote.yml`
+  - `image-retention.yml`
+- Replaced invalid workflow expression usage for build timestamp with runtime UTC timestamp generation.
+- Updated docs to reflect reusable workflow architecture and linting behavior:
+  - `README.md`
+  - `docs/workflow-variables.md`
+  - `docs/repository-structure.md`
+  - `tests/README.md`
+
 ## 0.5.0 - 2026-02-22
 
 ### Added

@@ -1,0 +1,586 @@
+name: Reusable Image Build
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: "Image key from catalog (for example: rhel9, win2022, or all)"
+        required: false
+        type: string
+        default: ""
+      clouds:
+        description: "Comma-separated clouds to build: aws,azure,gcp"
+        required: false
+        type: string
+        default: ""
+      channel:
+        description: "Lifecycle channel (candidate|prod). Typically candidate for builds."
+        required: false
+        type: string
+        default: ""
+      image_version:
+        description: "Optional image version override. If empty, workflow generates one."
+        required: false
+        type: string
+        default: ""
+      run_terratest:
+        description: "Run example Terratest after each matrix build (true|false)"
+        required: false
+        type: string
+        default: ""
+      publish_cis_sarif:
+        description: "Publish CIS summary as SARIF to GitHub Security (true|false)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+
+concurrency:
+  # Workflow-level concurrency: avoid overlapping runs for the same scope.
+  group: ${{ github.repository }}-${{ github.ref_name }}-image-build-${{ inputs.os != '' && inputs.os || 'all' }}-${{ inputs.clouds != '' && inputs.clouds || 'aws,azure,gcp' }}-${{ inputs.channel != '' && inputs.channel || 'candidate' }}
+  cancel-in-progress: false
+
+jobs:
+  prep:
+    # Compute build matrix and normalized runtime inputs from the image catalog.
+    runs-on: ubuntu-latest
+    outputs:
+      image_version: ${{ steps.version.outputs.image_version }}
+      matrix_json: ${{ steps.matrix.outputs.matrix_json }}
+      channel: ${{ steps.inputs.outputs.channel }}
+      run_terratest: ${{ steps.inputs.outputs.run_terratest }}
+      publish_cis_sarif: ${{ steps.inputs.outputs.publish_cis_sarif }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure jq is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      - name: Resolve event inputs with defaults
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_selector="${{ inputs.os || 'all' }}"
+          clouds_input="${{ inputs.clouds || 'aws,azure,gcp' }}"
+          channel_input="${{ inputs.channel || 'candidate' }}"
+          image_version_input="${{ inputs.image_version || '' }}"
+          run_terratest_input="${{ inputs.run_terratest || '' }}"
+          publish_cis_sarif_input="${{ inputs.publish_cis_sarif || '' }}"
+
+          if [[ "$channel_input" != "candidate" && "$channel_input" != "prod" ]]; then
+            echo "Invalid channel '$channel_input'. Allowed: candidate, prod" >&2
+            exit 1
+          fi
+
+          if [[ -z "$run_terratest_input" ]]; then
+            run_terratest_input="${{ vars.RUN_TERRATEST_ON_SCHEDULE || 'false' }}"
+          fi
+
+          if [[ "$run_terratest_input" != "true" && "$run_terratest_input" != "false" ]]; then
+            echo "Invalid run_terratest '$run_terratest_input'. Allowed: true, false" >&2
+            exit 1
+          fi
+
+          if [[ -z "$publish_cis_sarif_input" ]]; then
+            publish_cis_sarif_input="${{ vars.PUBLISH_CIS_SARIF_ON_SCHEDULE || 'true' }}"
+          fi
+
+          if [[ "$publish_cis_sarif_input" != "true" && "$publish_cis_sarif_input" != "false" ]]; then
+            echo "Invalid publish_cis_sarif '$publish_cis_sarif_input'. Allowed: true, false" >&2
+            exit 1
+          fi
+
+          echo "image_selector=$image_selector" >> "$GITHUB_OUTPUT"
+          echo "clouds=$clouds_input" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel_input" >> "$GITHUB_OUTPUT"
+          echo "image_version=$image_version_input" >> "$GITHUB_OUTPUT"
+          echo "run_terratest=$run_terratest_input" >> "$GITHUB_OUTPUT"
+          echo "publish_cis_sarif=$publish_cis_sarif_input" >> "$GITHUB_OUTPUT"
+
+      - name: Compute image version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ steps.inputs.outputs.image_version }}" ]]; then
+            echo "image_version=${{ steps.inputs.outputs.image_version }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          generated_version="$(date -u +%Y.%m.%d.%H%M).${{ github.run_number }}.${{ github.run_attempt }}"
+          echo "image_version=$generated_version" >> "$GITHUB_OUTPUT"
+
+      - name: Validate image version format
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_version="${{ steps.version.outputs.image_version }}"
+          if [[ ! "$image_version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{4}\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid image_version '$image_version'" >&2
+            echo "Expected format: YYYY.MM.DD.HHMM.run_number.run_attempt" >&2
+            exit 1
+          fi
+
+      - name: Build matrix from image catalog
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix_json="$(scripts/catalog/images.sh matrix "${{ steps.inputs.outputs.image_selector }}" "${{ steps.inputs.outputs.clouds }}")"
+          [[ "$matrix_json" != "[]" ]] || {
+            echo "Catalog selection resolved to an empty matrix" >&2
+            exit 1
+          }
+          echo "matrix_json=$matrix_json" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prep
+    runs-on: ubuntu-latest
+    concurrency:
+      # Job-level concurrency: serialize same image key + cloud + channel target.
+      group: ${{ github.repository }}-${{ github.ref_name }}-build-${{ matrix.image_key }}-${{ matrix.cloud }}-${{ needs.prep.outputs.channel }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        # Matrix is catalog-driven to keep workflow logic stable as new image types are added.
+        include: ${{ fromJSON(needs.prep.outputs.matrix_json) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure jq is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      - name: Resolve image metadata and required values
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image_key="${{ matrix.image_key }}"
+          cloud="${{ matrix.cloud }}"
+
+          workdir="$(scripts/catalog/images.sh get "$image_key" workdir)"
+          vars_file="$(scripts/catalog/images.sh get "$image_key" vars_file)"
+          override_dir="$(scripts/catalog/images.sh get "$image_key" override_dir)"
+          builder_target="$(scripts/catalog/images.sh builder "$image_key" "$cloud")"
+          os_type="$(scripts/catalog/images.sh get "$image_key" os_type)"
+          cis_role="$(scripts/catalog/images.sh get "$image_key" cis_role)"
+
+          if [[ ! -f "$vars_file" ]]; then
+            echo "Missing required file: $vars_file" >&2
+            echo "Create it from its .example file and commit/prepare it for your environment." >&2
+            exit 1
+          fi
+
+          override_file="$override_dir/${cloud}.pkrvars.hcl"
+          override_file_rel="overrides/${cloud}.pkrvars.hcl"
+          if [[ -f "$override_file" ]]; then
+            use_override="true"
+          else
+            use_override="false"
+            override_file_rel=""
+          fi
+
+          get_var() {
+            local key="$1"
+            local file="$2"
+            awk -F= -v k="$key" '
+              $1 ~ "^[[:space:]]*" k "[[:space:]]*$" {
+                v=$2
+                sub(/^[[:space:]]+/, "", v)
+                sub(/[[:space:]]*#.*/, "", v)
+                gsub(/\"/, "", v)
+                gsub(/[[:space:]]+$/, "", v)
+                print v
+                exit
+              }
+            ' "$file"
+          }
+
+          image_name="$(get_var image_name "$vars_file")"
+          aws_region="$(get_var aws_region "$vars_file")"
+          azure_resource_group="$(get_var azure_resource_group "$vars_file")"
+          gcp_project_id="$(get_var gcp_project_id "$vars_file")"
+
+          [[ -n "$image_name" ]] || { echo "image_name missing in $vars_file" >&2; exit 1; }
+          [[ -n "$aws_region" ]] || { echo "aws_region missing in $vars_file" >&2; exit 1; }
+          [[ -n "$azure_resource_group" ]] || { echo "azure_resource_group missing in $vars_file" >&2; exit 1; }
+          [[ -n "$gcp_project_id" ]] || { echo "gcp_project_id missing in $vars_file" >&2; exit 1; }
+
+          echo "image_key=$image_key" >> "$GITHUB_OUTPUT"
+          echo "cloud=$cloud" >> "$GITHUB_OUTPUT"
+          echo "workdir=$workdir" >> "$GITHUB_OUTPUT"
+          echo "vars_file=$vars_file" >> "$GITHUB_OUTPUT"
+          echo "override_file_rel=$override_file_rel" >> "$GITHUB_OUTPUT"
+          echo "use_override=$use_override" >> "$GITHUB_OUTPUT"
+          echo "builder_target=$builder_target" >> "$GITHUB_OUTPUT"
+          echo "os_type=$os_type" >> "$GITHUB_OUTPUT"
+          echo "cis_role=$cis_role" >> "$GITHUB_OUTPUT"
+          echo "image_name=$image_name" >> "$GITHUB_OUTPUT"
+          echo "aws_region=$aws_region" >> "$GITHUB_OUTPUT"
+          echo "azure_resource_group=$azure_resource_group" >> "$GITHUB_OUTPUT"
+          echo "gcp_project_id=$gcp_project_id" >> "$GITHUB_OUTPUT"
+
+      # Required repository variables/secrets for auth:
+      # AWS:   vars.AWS_ROLE_TO_ASSUME
+      # Azure: vars.AZURE_CLIENT_ID, vars.AZURE_TENANT_ID, vars.AZURE_SUBSCRIPTION_ID
+      # GCP:   vars.GCP_WORKLOAD_IDENTITY_PROVIDER, vars.GCP_SERVICE_ACCOUNT
+      - name: Configure AWS credentials
+        if: matrix.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-image-build
+          aws-region: ${{ steps.vars.outputs.aws_region }}
+
+      - name: Azure login (OIDC)
+        if: matrix.cloud == 'azure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Authenticate to Google Cloud (OIDC)
+        if: matrix.cloud == 'gcp'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        if: matrix.cloud == 'gcp'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Install Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: "1.15.0"
+
+      - name: Install Ansible (runner)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          pip3 install "ansible>=9,<11"
+
+      - name: Validate and build image with Packer
+        id: packer
+        shell: bash
+        env:
+          IMAGE_VERSION: ${{ needs.prep.outputs.image_version }}
+          CHANNEL: ${{ needs.prep.outputs.channel }}
+          GIT_SHA: ${{ github.sha }}
+          VARS_FILE: ${{ steps.vars.outputs.vars_file }}
+          OVERRIDE_FILE_REL: ${{ steps.vars.outputs.override_file_rel }}
+          USE_OVERRIDE: ${{ steps.vars.outputs.use_override }}
+          WORKDIR: ${{ steps.vars.outputs.workdir }}
+          BUILDER_TARGET: ${{ steps.vars.outputs.builder_target }}
+          IMAGE_KEY: ${{ steps.vars.outputs.image_key }}
+        run: |
+          set -euo pipefail
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          cd "$WORKDIR"
+
+          template_files=()
+          while IFS= read -r file; do
+            template_files+=("$file")
+          done < <(../../scripts/catalog/images.sh template-files "$IMAGE_KEY")
+
+          vars_file_local="$(basename "$VARS_FILE")"
+          [[ -f "$vars_file_local" ]] || { echo "Missing var file in workdir: $vars_file_local" >&2; exit 1; }
+          var_flags=(-var-file="$vars_file_local")
+
+          if [[ "$USE_OVERRIDE" == "true" ]]; then
+            [[ -f "$OVERRIDE_FILE_REL" ]] || { echo "Missing override file in workdir: $OVERRIDE_FILE_REL" >&2; exit 1; }
+            var_flags+=( -var-file="$OVERRIDE_FILE_REL" )
+          fi
+
+          packer init ../common/packer/versions.pkr.hcl
+          packer fmt -check .
+
+          packer validate \
+            "${var_flags[@]}" \
+            -var "image_version=$IMAGE_VERSION" \
+            -var "channel=$CHANNEL" \
+            -var "git_sha=$GIT_SHA" \
+            -var "build_date=$BUILD_DATE" \
+            "${template_files[@]}"
+
+          packer build \
+            -machine-readable \
+            -only="$BUILDER_TARGET" \
+            "${var_flags[@]}" \
+            -var "image_version=$IMAGE_VERSION" \
+            -var "channel=$CHANNEL" \
+            -var "git_sha=$GIT_SHA" \
+            -var "build_date=$BUILD_DATE" \
+            "${template_files[@]}" | tee packer-output.csv
+
+          artifact_id="$(grep ',artifact,.*id,' packer-output.csv | tail -n1 | awk -F, '{print $NF}')"
+          [[ -n "$artifact_id" ]] || { echo "Could not detect artifact id from Packer output" >&2; exit 1; }
+
+          echo "artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+          echo "only_target=$BUILDER_TARGET" >> "$GITHUB_OUTPUT"
+
+          cat > artifact-metadata.env <<EOF_META
+          os=$IMAGE_KEY
+          cloud=${{ matrix.cloud }}
+          image_name=${{ steps.vars.outputs.image_name }}
+          image_version=$IMAGE_VERSION
+          channel=$CHANNEL
+          artifact_id=$artifact_id
+          packer_target=$BUILDER_TARGET
+          vars_file=$vars_file_local
+          override_file=${OVERRIDE_FILE_REL:-none}
+          git_sha=$GIT_SHA
+          EOF_META
+
+      - name: Generate build evidence artifacts
+        shell: bash
+        env:
+          IMAGE_VERSION: ${{ needs.prep.outputs.image_version }}
+          CHANNEL: ${{ needs.prep.outputs.channel }}
+          GIT_SHA: ${{ github.sha }}
+          WORKDIR: ${{ steps.vars.outputs.workdir }}
+          CIS_ROLE: ${{ steps.vars.outputs.cis_role }}
+        run: |
+          set -euo pipefail
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          mkdir -p "$WORKDIR/build-artifacts/logs"
+          cp "$WORKDIR/packer-output.csv" "$WORKDIR/build-artifacts/logs/packer-output.csv"
+
+          # Build-level manifest artifact for CI traceability.
+          cat > "$WORKDIR/build-artifacts/manifest.json" <<EOF_MANIFEST
+          {
+            "image_name": "${{ steps.vars.outputs.image_name }}",
+            "image_version": "${IMAGE_VERSION}",
+            "git_sha": "${GIT_SHA}",
+            "build_date": "${BUILD_DATE}",
+            "channel": "${CHANNEL}",
+            "os": "${{ steps.vars.outputs.image_key }}",
+            "cloud": "${{ matrix.cloud }}",
+            "artifact_id": "${{ steps.packer.outputs.artifact_id }}"
+          }
+          EOF_MANIFEST
+
+          # CIS summary artifact derived from build evidence (role completion marker pattern).
+          cis_role_signal="not-detected"
+          cis_marker_signal="not-detected"
+          if grep -qi "ansible-lockdown" "$WORKDIR/packer-output.csv"; then
+            cis_role_signal="detected-in-build-log"
+          fi
+          if grep -qi "CIS applied via" "$WORKDIR/packer-output.csv"; then
+            cis_marker_signal="detected-in-build-log"
+          fi
+
+          cat > "$WORKDIR/build-artifacts/cis-report.json" <<EOF_CIS
+          {
+            "status": "informational",
+            "os": "${{ steps.vars.outputs.image_key }}",
+            "cloud": "${{ matrix.cloud }}",
+            "image_version": "${IMAGE_VERSION}",
+            "cis_role_expected": "${CIS_ROLE}",
+            "cis_role_signal": "${cis_role_signal}",
+            "cis_marker_signal": "${cis_marker_signal}",
+            "notes": "Template-level informational summary. Treat this as signal-only and add authoritative compliance tooling for enforcement."
+          }
+          EOF_CIS
+
+      - name: Setup Go
+        if: needs.prep.outputs.run_terratest == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Setup Terraform
+        if: needs.prep.outputs.run_terratest == 'true'
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Normalize artifact id for Terratest
+        if: needs.prep.outputs.run_terratest == 'true'
+        id: terratest_ids
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r line; do
+            [[ -n "$line" ]] && echo "$line" >> "$GITHUB_OUTPUT"
+          done < <(
+            tests/terratest/scripts/normalize-packer-artifact-id.sh \
+              "${{ matrix.cloud }}" \
+              "${{ steps.packer.outputs.artifact_id }}" \
+              "${{ steps.vars.outputs.aws_region }}" \
+              "${{ steps.vars.outputs.gcp_project_id }}"
+          )
+
+      - name: Run Terratest (example)
+        if: needs.prep.outputs.run_terratest == 'true'
+        working-directory: tests/terratest
+        shell: bash
+        env:
+          TEST_OS_TYPE: ${{ steps.vars.outputs.os_type }}
+          TERRATEST_ENABLE_AWS: ${{ matrix.cloud == 'aws' && 'true' || 'false' }}
+          TERRATEST_ENABLE_AZURE: ${{ matrix.cloud == 'azure' && 'true' || 'false' }}
+          TERRATEST_ENABLE_GCP: ${{ matrix.cloud == 'gcp' && 'true' || 'false' }}
+          AWS_TEST_REGION: ${{ steps.terratest_ids.outputs.terratest_aws_region }}
+          AWS_TEST_IMAGE_ID: ${{ steps.terratest_ids.outputs.terratest_image_id }}
+          AZURE_TEST_IMAGE_ID: ${{ steps.terratest_ids.outputs.terratest_image_id }}
+          AZURE_TEST_RESOURCE_GROUP: ${{ vars.AZURE_TEST_RESOURCE_GROUP }}
+          AZURE_TEST_SUBNET_ID: ${{ vars.AZURE_TEST_SUBNET_ID }}
+          AZURE_TEST_LOCATION: ${{ vars.AZURE_TEST_LOCATION }}
+          AZURE_TEST_ADMIN_USERNAME: ${{ vars.AZURE_TEST_ADMIN_USERNAME }}
+          AZURE_TEST_LINUX_SSH_PUBLIC_KEY: ${{ vars.AZURE_TEST_LINUX_SSH_PUBLIC_KEY }}
+          AZURE_TEST_WINDOWS_ADMIN_PASSWORD: ${{ secrets.AZURE_TEST_WINDOWS_ADMIN_PASSWORD }}
+          GCP_TEST_PROJECT_ID: ${{ steps.terratest_ids.outputs.terratest_gcp_project_id }}
+          GCP_TEST_ZONE: ${{ vars.GCP_TEST_ZONE }}
+          GCP_TEST_IMAGE_NAME: ${{ steps.terratest_ids.outputs.terratest_image_id }}
+        run: |
+          set -euo pipefail
+          go mod download
+          case "${{ matrix.cloud }}" in
+            aws) go test -v -run TestTerratestAWSImageInstance ./... | tee terratest.log ;;
+            azure) go test -v -run TestTerratestAzureImageInstance ./... | tee terratest.log ;;
+            gcp) go test -v -run TestTerratestGCPImageInstance ./... | tee terratest.log ;;
+          esac
+
+      - name: Upload Terratest log
+        if: needs.prep.outputs.run_terratest == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terratest-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}-${{ needs.prep.outputs.image_version }}
+          path: tests/terratest/terratest.log
+
+      - name: Generate CIS SARIF
+        if: needs.prep.outputs.publish_cis_sarif == 'true'
+        shell: bash
+        env:
+          WORKDIR: ${{ steps.vars.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          cis_json="$WORKDIR/build-artifacts/cis-report.json"
+          sarif_out="$WORKDIR/build-artifacts/cis-report.sarif"
+
+          [[ -f "$cis_json" ]] || { echo "Missing CIS report: $cis_json" >&2; exit 1; }
+
+          status="$(jq -r '(.status // "unknown") | ascii_downcase' "$cis_json")"
+
+          level="note"
+          case "$status" in
+            fail|failed|error) level="error" ;;
+            pass|ok|success) level="note" ;;
+            *) level="warning" ;;
+          esac
+
+          cat > "$sarif_out" <<EOF_SARIF
+          {
+            "version": "2.1.0",
+            "\$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "runs": [
+              {
+                "tool": {
+                  "driver": {
+                    "name": "image-factory-cis-summary",
+                    "informationUri": "https://github.com/${{ github.repository }}",
+                    "rules": [
+                      {
+                        "id": "CIS-SUMMARY-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}",
+                        "name": "CIS summary signal",
+                        "shortDescription": { "text": "CIS template summary for image build" },
+                        "helpUri": "https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/cis.md"
+                      }
+                    ]
+                  }
+                },
+                "results": [
+                  {
+                    "ruleId": "CIS-SUMMARY-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}",
+                    "level": "$level",
+                    "message": {
+                      "text": "CIS summary status for ${{ steps.vars.outputs.image_key }}/${{ matrix.cloud }} is '$status'. See uploaded build artifacts for raw details."
+                    },
+                    "locations": [
+                      {
+                        "physicalLocation": {
+                          "artifactLocation": {
+                            "uri": "$WORKDIR/build-artifacts/cis-report.json"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+          EOF_SARIF
+
+      - name: Publish build summary
+        shell: bash
+        env:
+          WORKDIR: ${{ steps.vars.outputs.workdir }}
+        run: |
+          set -euo pipefail
+          manifest_json="$WORKDIR/build-artifacts/manifest.json"
+          cis_json="$WORKDIR/build-artifacts/cis-report.json"
+
+          image_name="$(jq -r '.image_name // "unknown"' "$manifest_json")"
+          image_version="$(jq -r '.image_version // "unknown"' "$manifest_json")"
+          artifact_id="$(jq -r '.artifact_id // "unknown"' "$manifest_json")"
+          cis_status="$(jq -r '.status // "unknown"' "$cis_json")"
+          cis_signal="$(jq -r '.cis_marker_signal // "unknown"' "$cis_json")"
+
+          {
+            echo "## Image Build Summary: ${{ steps.vars.outputs.image_key }} / ${{ matrix.cloud }}"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Image name | \`$image_name\` |"
+            echo "| Image version | \`$image_version\` |"
+            echo "| Channel | \`${{ needs.prep.outputs.channel }}\` |"
+            echo "| Artifact ID | \`$artifact_id\` |"
+            echo "| CIS status | \`$cis_status\` |"
+            echo "| CIS signal | \`$cis_signal\` |"
+            echo "| SARIF upload enabled | \`${{ needs.prep.outputs.publish_cis_sarif }}\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CIS SARIF to GitHub Security
+        if: needs.prep.outputs.publish_cis_sarif == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.vars.outputs.workdir }}/build-artifacts/cis-report.sarif
+          category: cis-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ steps.vars.outputs.image_key }}-${{ matrix.cloud }}-${{ needs.prep.outputs.image_version }}
+          path: |
+            ${{ steps.vars.outputs.workdir }}/packer-output.csv
+            ${{ steps.vars.outputs.workdir }}/artifact-metadata.env
+            ${{ steps.vars.outputs.workdir }}/build-artifacts/manifest.json
+            ${{ steps.vars.outputs.workdir }}/build-artifacts/cis-report.json
+            ${{ steps.vars.outputs.workdir }}/build-artifacts/cis-report.sarif
+            ${{ steps.vars.outputs.workdir }}/build-artifacts/logs/**

@@ -13,6 +13,9 @@ This document lists GitHub repository variables and secrets expected by workflow
 
 ## Build Workflow (`image-build.yml`)
 
+Implementation note:
+- `image-build.yml` is a trigger wrapper that delegates execution to `reusable-image-build.yml`.
+
 Optional variables:
 
 - `RUN_TERRATEST_ON_SCHEDULE` (`true|false`, default `false`)
@@ -31,6 +34,7 @@ The generated `cis-report.json` is an informational signal artifact by default, 
 Toolchain pin:
 
 - Packer is installed as `1.15.0` in `image-build.yml` (no `latest` usage).
+- `jq` is verified/installed in build/promotion/retention workflows before catalog resolution.
 
 ## Retention Workflow (`image-retention.yml`)
 
@@ -101,3 +105,8 @@ Automatic build version format:
 ## Security Guidance
 
 Use OIDC federation and short-lived credentials. Do not store long-lived cloud keys in GitHub secrets for routine operation.
+
+## Local Workflow Linting
+
+- `tests/ci/lint-workflows.sh` runs `actionlint` for semantic GitHub Actions validation.
+- `tests/run-all.sh` includes workflow semantic linting by default.

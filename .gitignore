@@ -19,3 +19,4 @@ tests/terratest/*.pem
 # Local tooling state
 .DS_Store
 *.log
+.bin/

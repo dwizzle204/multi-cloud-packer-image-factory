@@ -28,6 +28,11 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  # Avoid duplicate test runs against the same image target.
+  group: ${{ github.repository }}-${{ github.ref_name }}-terratest-${{ inputs.cloud }}-${{ inputs.os_type }}-${{ inputs.image_id }}
+  cancel-in-progress: false
+
 jobs:
   terratest:
     # Launches ephemeral test infrastructure and validates runtime behavior.

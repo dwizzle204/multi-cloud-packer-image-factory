@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # Keep one run per target example at a time.
+  group: ${{ github.repository }}-${{ github.ref_name }}-terratest-os-example-${{ inputs.target }}
+  cancel-in-progress: false
+
 jobs:
   run-os-example:
     # Purposefully lightweight examples for quick, targeted validation.

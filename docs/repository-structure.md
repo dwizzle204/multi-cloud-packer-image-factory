@@ -15,6 +15,7 @@
 ## Workflow files
 
 - `image-build.yml`: build and validation artifacts
+- `reusable-image-build.yml`: reusable build implementation invoked by `image-build.yml`
 - `image-terratest.yml`: cloud fixture Terratest execution
 - `terratest-os-examples.yml`: SSH-based RHEL/Windows example tests
 - `image-promote.yml`: channel promotion (metadata only)
